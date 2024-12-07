@@ -1,0 +1,172 @@
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Voice AI</title>
+  </head>
+  <body>
+    <button id="record">Toggle Recording</button>
+    <span id="status"></span>
+    <div id="captions"></div>
+
+    <h2>Response:</h2>
+    <p id="llm-time"></p>
+    <div id="response-container"></div>
+    <p id="tts-time"></p>
+    <audio id="audio-player" controls></audio>
+
+    <script type="module">
+        import {
+          createClient,
+          LiveTranscriptionEvents,
+        } from "https://cdn.jsdelivr.net/npm/@deepgram/sdk/+esm";
+      
+        let mediaRecorder;
+        let dgConnection;
+
+      
+        const startRecording = async () => {
+          // Create Deepgram client
+          const deepgram = createClient("a6b0f28cc31a20365ed428c4c29a1549d1281567");
+          
+          // Establish a connection with Deepgram
+          const dgConnection = deepgram.listen.live({
+            model: "nova",
+            diarize: true,
+            interim_results: false, // Only final transcripts
+        });
+
+      
+          // Add listeners to the Deepgram connection
+          dgConnection.on(LiveTranscriptionEvents.Open, () => {
+            console.log("Deepgram connection opened.");
+      
+            // Prevent adding duplicate event listeners
+            if (!dgConnection.transcriptListenerAdded) {
+                dgConnection.on(LiveTranscriptionEvents.Transcript, (data) => {
+                    const transcript = data.channel.alternatives[0].transcript;
+                    if (transcript && data.is_final) {
+                        document.querySelector("#captions").textContent += transcript + " ";
+                        console.log(data);
+                    }
+                });
+
+              dgConnection.transcriptListenerAdded = true; // Flag to avoid duplicates
+            }
+      
+            // Access user's microphone and start recording
+            navigator.mediaDevices
+              .getUserMedia({ audio: true })
+              .then((stream) => {
+                mediaRecorder = new MediaRecorder(stream, {
+                  mimeType: "audio/webm",
+                });
+      
+                mediaRecorder.addEventListener("dataavailable", async (event) => {
+                  if (event.data.size > 0) {
+                    dgConnection.send(event.data);
+                  }
+                });
+      
+                mediaRecorder.start(1000); // Send audio chunks every 1000ms
+              })
+              .catch((error) => {
+                console.error("Error accessing microphone:", error);
+              });
+          });
+      
+          dgConnection.on(LiveTranscriptionEvents.Close, () => {
+            console.log("Deepgram connection closed.");
+          });
+      
+          dgConnection.on(LiveTranscriptionEvents.Error, (error) => {
+            console.error("Deepgram error:", error);
+          });
+        };
+      
+        const stopRecording = () => {
+          if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+          if (dgConnection) {
+            dgConnection.finish(); // Close Deepgram connection
+          }
+          LLM(document.querySelector("#captions").textContent);
+          document.querySelector("#status").textContent = "";
+          document.querySelector("#captions").textContent = "";
+        };
+      
+        document.querySelector("#record").addEventListener("click", () => {
+          if (mediaRecorder && mediaRecorder.state === "recording") {
+            stopRecording();
+          } else {
+            startRecording();
+            document.querySelector("#status").textContent = "Listening...";
+          }
+        });
+
+        const TTS = async (text) => {
+            const audioPlayer = document.getElementById("audio-player");
+            const ttsTime = document.getElementById("tts-time");
+
+            if(!text) return;
+            const start = performance.now();
+            try {
+                const response = await fetch("http://localhost:3000/generate-audio", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ text }),
+                });
+
+                if (!response.ok) {
+                    console.error("Error from server:", await response.text());
+                    return;
+                }
+
+                const arrayBuffer = await response.arrayBuffer();
+                const blob = new Blob([arrayBuffer], { type: "audio/wav" });
+                const url = URL.createObjectURL(blob);
+                audioPlayer.src = url;
+                const end = performance.now();
+                ttsTime.textContent = `Generated audio in ${((end - start) / 1000).toFixed(2)} seconds`;
+                audioPlayer.play();
+            } catch (err) {
+                console.error("Fetch error:", err);
+            }
+
+        }
+        const LLM = async () => {
+            const responseContainer = document.getElementById("response-container");
+            const promptInput = document.getElementById("captions");
+            const timeTaken = document.getElementById("llm-time");
+
+            const userInput = promptInput.textContent;
+            responseContainer.textContent = "Loading...";
+
+            try {
+                const res = await fetch("http://localhost:3000/generate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userInput }),
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    responseContainer.textContent = data.response;
+                    timeTaken.textContent = `Time taken: ${data.time} ms`;
+                    TTS(data.response);
+                } else {
+                    responseContainer.textContent = data.error || "An error occurred.";
+                }
+            } catch (error) {
+                console.error("Fetch error:", error);
+                responseContainer.textContent = "An error occurred. Check the console for details.";
+            }
+        }
+
+
+      </script>
+      
+  </body>
+</html>
